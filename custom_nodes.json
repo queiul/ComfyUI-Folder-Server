@@ -1,0 +1,16 @@
+{
+    "title": "Comfyui Folder Server",
+    "description": "A ComfyUI node that serves files from input and output folders with real-time change notifications.",
+    "author": "Queiul",
+    "version": "1.0.0",
+    "repo": "https://github.com/queiul/comfyui-folder-server",
+    "tags": ["utility", "file management", "websocket", "watchdog"],
+    "min_comfy_version": "1.0.0",
+    "node_implementations": {},
+    "dependencies": [
+      {
+        "name": "watchdog",
+        "pip": "watchdog>=3.0.0"
+      }
+    ]
+  }
