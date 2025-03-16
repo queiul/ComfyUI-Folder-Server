@@ -28,6 +28,7 @@ from watchdog.events import FileSystemEventHandler
 # Store WebSocket connections and their subscriptions
 websocket_connections = {}
 file_watchers = {}
+main_event_loop = None
 
 # File event handler class
 class FileChangeHandler(FileSystemEventHandler):
@@ -46,6 +47,7 @@ class FileChangeHandler(FileSystemEventHandler):
             event_type = "directory_created"
         else:
             event_type = "file_created"
+        print(event_type, event.src_path)
         self.notify_clients(event_type, event.src_path)
     
     def on_deleted(self, event):
@@ -79,11 +81,12 @@ class FileChangeHandler(FileSystemEventHandler):
         if dest_path:
             message["destination"] = relative_dest
         
-        # Send to all subscribed WebSocket connections
-        asyncio.run_coroutine_threadsafe(
-            broadcast_event(self.folder_type, message), 
-            asyncio.get_event_loop()
-        )
+        # Use the stored main event loop instead of trying to get one from this thread
+        if main_event_loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                broadcast_event(self.folder_type, message), 
+                main_event_loop
+            )
 
 # Broadcast events to subscribed clients
 async def broadcast_event(folder_type, message):
@@ -96,63 +99,63 @@ async def broadcast_event(folder_type, message):
                 if ws in websocket_connections:
                     del websocket_connections[ws]
 
-# Define the class for the custom node
-class FolderServerNode:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "folder_type": (["input", "output"], "The folder to serve (input or output)"),
-                "watch_for_changes": (["True", "False"], "Enable real-time file change notifications"),
-            },
-            "optional": {
-                "subfolder": ("STRING", {"default": "", "multiline": False}),
-            }
-        }
+# # Define the class for the custom node
+# class FolderServerNode:
+#     @classmethod
+#     def INPUT_TYPES(cls):
+#         return {
+#             "required": {
+#                 "folder_type": (["input", "output"], "The folder to serve (input or output)"),
+#                 "watch_for_changes": (["True", "False"], "Enable real-time file change notifications"),
+#             },
+#             "optional": {
+#                 "subfolder": ("STRING", {"default": "", "multiline": False}),
+#             }
+#         }
     
-    RETURN_TYPES = ("STRING",)
-    FUNCTION = "serve_folder"
-    CATEGORY = "utils"
-    OUTPUT_NODE = True
+    # RETURN_TYPES = ("STRING",)
+    # FUNCTION = "serve_folder"
+    # CATEGORY = "utils"
+    # OUTPUT_NODE = True
 
-    def serve_folder(self, folder_type, watch_for_changes, subfolder=""):
-        folder_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))), folder_type)
-        if subfolder:
-            folder_path = os.path.join(folder_path, subfolder)
+    # def serve_folder(self, folder_type, watch_for_changes, subfolder=""):
+    #     folder_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))), folder_type)
+    #     if subfolder:
+    #         folder_path = os.path.join(folder_path, subfolder)
         
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path, exist_ok=True)
+    #     if not os.path.exists(folder_path):
+    #         os.makedirs(folder_path, exist_ok=True)
         
-        # Set up file watching if enabled
-        watch_value = watch_for_changes == "True"
-        if watch_value:
-            self.setup_folder_watcher(folder_type, folder_path)
-            status = f"Serving {folder_type} folder with change notifications: {folder_path}"
-        else:
-            status = f"Serving {folder_type} folder: {folder_path}"
+    #     # Set up file watching if enabled
+    #     watch_value = watch_for_changes == "True"
+    #     if watch_value:
+    #         self.setup_folder_watcher(folder_type, folder_path)
+    #         status = f"Serving {folder_type} folder with change notifications: {folder_path}"
+    #     else:
+    #         status = f"Serving {folder_type} folder: {folder_path}"
         
-        return (status,)
+    #     return (status,)
     
-    def setup_folder_watcher(self, folder_type, folder_path):
-        # Only set up watcher if not already watching this folder
-        watcher_key = f"{folder_type}:{folder_path}"
-        if watcher_key not in file_watchers:
-            handler = FileChangeHandler(folder_type, folder_path)
-            observer = Observer()
-            observer.schedule(handler, folder_path, recursive=True)
-            observer.start()
-            file_watchers[watcher_key] = observer
-            print(f"Started file watcher for {folder_type} folder: {folder_path}")
+    # def setup_folder_watcher(self, folder_type, folder_path):
+    #     # Only set up watcher if not already watching this folder
+    #     watcher_key = f"{folder_type}:{folder_path}"
+    #     if watcher_key not in file_watchers:
+    #         handler = FileChangeHandler(folder_type, folder_path)
+    #         observer = Observer()
+    #         observer.schedule(handler, folder_path, recursive=True)
+    #         observer.start()
+    #         file_watchers[watcher_key] = observer
+    #         print(f"Started file watcher for {folder_type} folder: {folder_path}")
 
-# # Register the node with ComfyUI
-# NODE_CLASS_MAPPINGS = {
-#     "FolderServerNode": FolderServerNode
-# }
+# Register the node with ComfyUI
+NODE_CLASS_MAPPINGS = {
+    # "FolderServerNode": FolderServerNode
+}
 
-# # Register the node display name
-# NODE_DISPLAY_NAME_MAPPINGS = {
-#     "FolderServerNode": "Folder Server"
-# }
+# Register the node display name
+NODE_DISPLAY_NAME_MAPPINGS = {
+    # "FolderServerNode": "Folder Server"
+}
 
 # Add API routes
 @server.PromptServer.instance.routes.get("/folder_server/list/{folder_type}")
@@ -667,11 +670,17 @@ print("Folder Server node with file change notifications loaded!")
 
 # Initialize default watchers for input and output folders when ComfyUI starts
 def initialize_default_watchers():
+    global main_event_loop
+    # Store the main thread's event loop
+    main_event_loop = asyncio.get_event_loop()
+
     base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
     
     # Set up watchers for main input and output folders
     input_folder = os.path.join(base_path, "input")
     output_folder = os.path.join(base_path, "output")
+
+    print(output_folder)
     
     # Create folders if they don't exist
     os.makedirs(input_folder, exist_ok=True)
