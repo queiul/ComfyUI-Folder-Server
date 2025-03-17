@@ -15,8 +15,8 @@ if importlib.util.find_spec("watchdog") is None:
 
 import json
 import shutil
-import time
 import asyncio
+import time
 import threading
 from aiohttp import web, WSCloseCode
 import server
@@ -29,8 +29,14 @@ from watchdog.events import FileSystemEventHandler
 websocket_connections = {}
 file_watchers = {}
 main_event_loop = None
+file_listing_cache = {}
+cache_lock = threading.Lock()
+CACHE_TIMEOUT = 5  # Cache timeout in seconds
+MAX_CACHE_ENTRIES = 100
+CACHE_CLEANUP_INTERVAL = 300  # 5 minutes in seconds
 
 # File event handler class
+# Modify the file event handler to invalidate cache
 class FileChangeHandler(FileSystemEventHandler):
     def __init__(self, folder_type, folder_path):
         self.folder_type = folder_type
@@ -43,14 +49,21 @@ class FileChangeHandler(FileSystemEventHandler):
         return path
     
     def on_created(self, event):
+        # Invalidate cache for the parent directory
+        parent_dir = os.path.dirname(event.src_path)
+        self._invalidate_cache(parent_dir)
+        
         if event.is_directory:
             event_type = "directory_created"
         else:
             event_type = "file_created"
-        print(event_type, event.src_path)
         self.notify_clients(event_type, event.src_path)
     
     def on_deleted(self, event):
+        # Invalidate cache for the parent directory
+        parent_dir = os.path.dirname(event.src_path)
+        self._invalidate_cache(parent_dir)
+        
         if event.is_directory:
             event_type = "directory_deleted"
         else:
@@ -59,14 +72,31 @@ class FileChangeHandler(FileSystemEventHandler):
     
     def on_modified(self, event):
         if not event.is_directory:
+            # For file modifications, invalidate both the file and its parent directory
+            self._invalidate_cache(event.src_path)
+            parent_dir = os.path.dirname(event.src_path)
+            self._invalidate_cache(parent_dir)
+            
             self.notify_clients("file_modified", event.src_path)
     
     def on_moved(self, event):
+        # Invalidate cache for both source and destination parent directories
+        src_parent = os.path.dirname(event.src_path)
+        dest_parent = os.path.dirname(event.dest_path)
+        self._invalidate_cache(src_parent)
+        self._invalidate_cache(dest_parent)
+        
         if event.is_directory:
             event_type = "directory_moved"
         else:
             event_type = "file_moved"
         self.notify_clients(event_type, event.src_path, event.dest_path)
+    
+    def _invalidate_cache(self, path):
+        """Invalidate the cache for a specific path"""
+        with cache_lock:
+            if path in file_listing_cache:
+                del file_listing_cache[path]
     
     def notify_clients(self, event_type, src_path, dest_path=None):
         relative_src = self.get_relative_path(src_path)
@@ -87,6 +117,53 @@ class FileChangeHandler(FileSystemEventHandler):
                 broadcast_event(self.folder_type, message), 
                 main_event_loop
             )
+
+# Add this function to clean up the cache periodically
+def cleanup_cache():
+    """
+    Periodically clean up the file listing cache to prevent memory bloat
+    """
+    global file_listing_cache
+    
+    while True:
+        time.sleep(CACHE_CLEANUP_INTERVAL)
+        
+        try:
+            with cache_lock:
+                current_time = time.time()
+                # Remove expired entries
+                expired_keys = [
+                    key for key, entry in file_listing_cache.items()
+                    if current_time - entry["timestamp"] > CACHE_TIMEOUT
+                ]
+                
+                for key in expired_keys:
+                    del file_listing_cache[key]
+                
+                # If still too many entries, remove the oldest ones
+                if len(file_listing_cache) > MAX_CACHE_ENTRIES:
+                    # Sort by timestamp (oldest first)
+                    sorted_entries = sorted(
+                        file_listing_cache.items(),
+                        key=lambda x: x[1]["timestamp"]
+                    )
+                    
+                    # Remove oldest entries
+                    entries_to_remove = len(file_listing_cache) - MAX_CACHE_ENTRIES
+                    for i in range(entries_to_remove):
+                        key = sorted_entries[i][0]
+                        del file_listing_cache[key]
+                
+                print(f"Cache cleanup: removed {len(expired_keys)} expired entries, {len(file_listing_cache)} entries remaining")
+        
+        except Exception as e:
+            print(f"Error in cache cleanup: {str(e)}")
+
+# Start the cache cleanup thread when the module is loaded
+def start_cache_cleanup():
+    cleanup_thread = threading.Thread(target=cleanup_cache, daemon=True)
+    cleanup_thread.start()
+    print("File listing cache cleanup thread started")
 
 # Broadcast events to subscribed clients
 async def broadcast_event(folder_type, message):
@@ -156,8 +233,47 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     # "FolderServerNode": "Folder Server"
 }
+    
+# Add this function to check and update the cache
+def get_cached_directory_listing(folder_path, force_refresh=False):
+    """
+    Get cached directory listing or scan the directory if needed
+    
+    Args:
+        folder_path: Path to the directory
+        force_refresh: Force a refresh of the cache
+        
+    Returns:
+        List of os.DirEntry objects
+    """
+    global file_listing_cache
+    
+    with cache_lock:
+        cache_key = folder_path
+        current_time = time.time()
+        
+        cache_entry = file_listing_cache.get(cache_key)
+        
+        # Check if we have a valid cache entry
+        if not force_refresh and cache_entry and (current_time - cache_entry["timestamp"] < CACHE_TIMEOUT):
+            return cache_entry["entries"]
+        
+        # Scan the directory and update cache
+        try:
+            entries = list(os.scandir(folder_path))
+            file_listing_cache[cache_key] = {
+                "entries": entries,
+                "timestamp": current_time
+            }
+            return entries
+        except Exception as e:
+            # If there's an error, invalidate the cache for this path
+            if cache_key in file_listing_cache:
+                del file_listing_cache[cache_key]
+            raise e
 
-# Add API routes
+
+# Update the list_folder function to use the cache
 @server.PromptServer.instance.routes.get("/folder_server/list/{folder_type}")
 async def list_folder(request):
     folder_type = request.match_info["folder_type"]
@@ -165,7 +281,36 @@ async def list_folder(request):
     if folder_type not in ["input", "output"]:
         return web.json_response({"error": "Invalid folder type"}, status=400)
     
+    # Get query parameters
     subfolder = request.query.get("subfolder", "")
+    sort_by = request.query.get("sort_by", "name")
+    sort_order = request.query.get("sort_order", "asc")
+    page = int(request.query.get("page", 1))
+    limit = int(request.query.get("limit", 100))
+    refresh_cache = request.query.get("refresh", "false").lower() == "true"
+    
+    # Filtering options
+    dirs_only = request.query.get("dirs_only", "false").lower() == "true"
+    files_only = request.query.get("files_only", "false").lower() == "true"
+    extensions = request.query.get("extensions", None)  # Comma-separated list of extensions
+    exclude_extensions = request.query.get("exclude_extensions", None)  # Extensions to exclude
+    filename_filter = request.query.get("filter", None)  # Text filter for filenames
+    
+    # Parse extensions if provided
+    extension_list = None
+    if extensions:
+        extension_list = [ext.strip().lower() for ext in extensions.split(",")]
+    
+    exclude_extension_list = None
+    if exclude_extensions:
+        exclude_extension_list = [ext.strip().lower() for ext in exclude_extensions.split(",")]
+    
+    # Validate sorting parameters
+    valid_sort_fields = ["name", "size", "modified", "created"]
+    if sort_by not in valid_sort_fields:
+        sort_by = "name"
+    if sort_order not in ["asc", "desc"]:
+        sort_order = "asc"
     
     # Construct the folder path
     base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -177,19 +322,92 @@ async def list_folder(request):
     if not os.path.exists(folder_path):
         return web.json_response({"error": "Folder not found"}, status=404)
     
-    files = []
-    for file in os.listdir(folder_path):
-        file_path = os.path.join(folder_path, file)
-        file_info = {
-            "name": file,
-            "path": os.path.join(folder_type, subfolder, file) if subfolder else os.path.join(folder_type, file),
-            "is_dir": os.path.isdir(file_path),
-            "size": os.path.getsize(file_path) if not os.path.isdir(file_path) else 0,
-            "modified": os.path.getmtime(file_path)
-        }
-        files.append(file_info)
+    # Get directory listing from cache or scan
+    try:
+        # Use cached listing if available
+        all_entries = get_cached_directory_listing(folder_path, force_refresh=refresh_cache)
+        
+        # Apply filters
+        filtered_entries = []
+        for entry in all_entries:
+            # Directory filter
+            if dirs_only and not entry.is_dir():
+                continue
+            if files_only and entry.is_dir():
+                continue
+            
+            # Extension filter
+            if not entry.is_dir():
+                _, ext = os.path.splitext(entry.name)
+                ext = ext.lower()[1:] if ext else ""  # Remove the dot
+                
+                if extension_list and ext not in extension_list:
+                    continue
+                    
+                if exclude_extension_list and ext in exclude_extension_list:
+                    continue
+            
+            # Filename filter
+            if filename_filter and filename_filter.lower() not in entry.name.lower():
+                continue
+            
+            filtered_entries.append(entry)
+        
+        total_count = len(filtered_entries)
+        
+        # Sort entries
+        if sort_by == "name":
+            filtered_entries.sort(key=lambda e: e.name.lower(), reverse=(sort_order == "desc"))
+        elif sort_by == "size":
+            filtered_entries.sort(key=lambda e: e.stat().st_size if not e.is_dir() else 0, reverse=(sort_order == "desc"))
+        elif sort_by == "modified":
+            filtered_entries.sort(key=lambda e: e.stat().st_mtime, reverse=(sort_order == "desc"))
+        elif sort_by == "created":
+            filtered_entries.sort(key=lambda e: e.stat().st_ctime, reverse=(sort_order == "desc"))
+        
+        # Apply pagination
+        offset = (page - 1) * limit
+        paginated_entries = filtered_entries[offset:offset + limit]
+        
+        # Create file info dictionaries
+        files = []
+        for entry in paginated_entries:
+            stat_info = entry.stat()
+            file_info = {
+                "name": entry.name,
+                "path": os.path.join(folder_type, subfolder, entry.name) if subfolder else os.path.join(folder_type, entry.name),
+                "is_dir": entry.is_dir(),
+                "size": stat_info.st_size if not entry.is_dir() else 0,
+                "modified": stat_info.st_mtime,
+                "created": stat_info.st_ctime
+            }
+            files.append(file_info)
+        
+        # Return paginated results with metadata
+        return web.json_response({
+            "files": files,
+            "pagination": {
+                "total": total_count,
+                "page": page,
+                "limit": limit,
+                "total_pages": (total_count + limit - 1) // limit if limit > 0 else 1
+            },
+            "sort": {
+                "field": sort_by,
+                "order": sort_order
+            },
+            "filters_applied": {
+                "dirs_only": dirs_only,
+                "files_only": files_only,
+                "extensions": extension_list,
+                "exclude_extensions": exclude_extension_list,
+                "filename_filter": filename_filter
+            }
+        })
     
-    return web.json_response({"files": files})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
 
 @server.PromptServer.instance.routes.get("/folder_server/file/{folder_type}/{file_path:.*}")
 async def get_file(request):
@@ -471,14 +689,58 @@ async def api_docs(request):
         <div class="endpoint">
             <h2>REST API Endpoints</h2>
             
+            <!-- Update the List Folder Contents section in the API documentation HTML -->
             <h3>List Folder Contents</h3>
-            <p><span class="method">GET</span> <span class="url">/folder_server/list/{folder_type}?subfolder={subfolder}</span></p>
-            <p>Lists all files and directories in the specified folder.</p>
+            <p><span class="method">GET</span> <span class="url">/folder_server/list/{folder_type}</span></p>
+            <p>Lists files and directories in the specified folder with sorting, pagination, and filtering support.</p>
             <p>Parameters:</p>
             <ul>
                 <li><strong>folder_type</strong>: Either "input" or "output"</li>
                 <li><strong>subfolder</strong> (optional): Subfolder path</li>
+                <li><strong>sort_by</strong> (optional): Field to sort by. Options: "name", "size", "modified", "created". Default: "name"</li>
+                <li><strong>sort_order</strong> (optional): Sort direction. Options: "asc", "desc". Default: "asc"</li>
+                <li><strong>page</strong> (optional): Page number for pagination. Default: 1</li>
+                <li><strong>limit</strong> (optional): Number of items per page. Default: 100</li>
+                <li><strong>refresh</strong> (optional): Force refresh of the directory cache. Options: "true", "false". Default: "false"</li>
+                <li><strong>dirs_only</strong> (optional): Only list directories. Options: "true", "false". Default: "false"</li>
+                <li><strong>files_only</strong> (optional): Only list files. Options: "true", "false". Default: "false"</li>
+                <li><strong>extensions</strong> (optional): Filter files by extensions (comma-separated). Example: "jpg,png,gif"</li>
+                <li><strong>exclude_extensions</strong> (optional): Exclude files with these extensions (comma-separated). Example: "tmp,bak"</li>
+                <li><strong>filter</strong> (optional): Text filter for filenames (case-insensitive)</li>
             </ul>
+            <p>Example response:</p>
+            <pre>
+            {
+                "files": [
+                    {
+                    "name": "image1.png",
+                    "path": "output/images/image1.png",
+                    "is_dir": false,
+                    "size": 12345,
+                    "modified": 1615480345.123,
+                    "created": 1615480340.123
+                    },
+                    ...
+                ],
+                "pagination": {
+                    "total": 10542,
+                    "page": 1,
+                    "limit": 100,
+                    "total_pages": 106
+                },
+                "sort": {
+                    "field": "modified",
+                    "order": "desc"
+                },
+                "filters_applied": {
+                    "dirs_only": false,
+                    "files_only": false,
+                    "extensions": ["png", "jpg"],
+                    "exclude_extensions": null,
+                    "filename_filter": null
+                }
+            }
+            </pre>
         </div>
         
         <div class="endpoint">
@@ -666,9 +928,8 @@ async def api_docs(request):
 
 print("Folder Server node with file change notifications loaded!")
 
-# Add this at the end of your file (folder_server.py)
 
-# Initialize default watchers for input and output folders when ComfyUI starts
+# Call this function in your initialization code
 def initialize_default_watchers():
     global main_event_loop
     # Store the main thread's event loop
@@ -699,6 +960,9 @@ def initialize_default_watchers():
     output_observer.start()
     file_watchers["output:default"] = output_observer
     
+    # Start the cache cleanup thread
+    start_cache_cleanup()
+
     print("Folder Server: Automatically started file watchers for input and output folders")
 
 # Call this function when the module is imported
