@@ -86,7 +86,6 @@
     <div class="endpoint">
         <h2>REST API Endpoints</h2>
 
-        <!-- Update the List Folder Contents section in the API documentation HTML -->
         <h3>List Folder Contents</h3>
         <p><span class="method">GET</span> <span class="url">/folder_server/list/{folder_type}</span></p>
         <p>Lists files and directories in the specified folder with sorting, pagination, and filtering support.</p>
@@ -94,55 +93,110 @@
         <ul>
             <li><strong>folder_type</strong>: Either "input" or "output"</li>
             <li><strong>subfolder</strong> (optional): Subfolder path</li>
-            <li><strong>sort_by</strong> (optional): Field to sort by. Options: "name", "size", "modified", "created".
-                Default: "name"</li>
+            <li><strong>sort_by</strong> (optional): Field to sort by. Options: "name", "size", "modified", "created". Default: "name"</li>
             <li><strong>sort_order</strong> (optional): Sort direction. Options: "asc", "desc". Default: "asc"</li>
             <li><strong>page</strong> (optional): Page number for pagination. Default: 1</li>
             <li><strong>limit</strong> (optional): Number of items per page. Default: 100</li>
-            <li><strong>refresh</strong> (optional): Force refresh of the directory cache. Options: "true", "false".
-                Default: "false"</li>
-            <li><strong>dirs_only</strong> (optional): Only list directories. Options: "true", "false". Default: "false"
-            </li>
+            <li><strong>refresh</strong> (optional): Force refresh of the directory cache. Options: "true", "false". Default: "false"</li>
+            <li><strong>dirs_only</strong> (optional): Only list directories. Options: "true", "false". Default: "false"</li>
             <li><strong>files_only</strong> (optional): Only list files. Options: "true", "false". Default: "false"</li>
-            <li><strong>extensions</strong> (optional): Filter files by extensions (comma-separated). Example:
-                "jpg,png,gif"</li>
-            <li><strong>exclude_extensions</strong> (optional): Exclude files with these extensions (comma-separated).
-                Example: "tmp,bak"</li>
+            <li><strong>extensions</strong> (optional): Filter files by extensions (comma-separated). Example: "jpg,png,gif"</li>
+            <li><strong>exclude_extensions</strong> (optional): Exclude files with these extensions (comma-separated). Example: "tmp,bak"</li>
             <li><strong>filter</strong> (optional): Text filter for filenames (case-insensitive)</li>
         </ul>
         <p>Example response:</p>
         <pre>
-            {
-                "files": [
-                    {
-                    "name": "image1.png",
-                    "path": "output/images/image1.png",
-                    "is_dir": false,
-                    "size": 12345,
-                    "modified": 1615480345.123,
-                    "created": 1615480340.123
-                    },
-                    ...
-                ],
-                "pagination": {
-                    "total": 10542,
-                    "page": 1,
-                    "limit": 100,
-                    "total_pages": 106
-                },
-                "sort": {
-                    "field": "modified",
-                    "order": "desc"
-                },
-                "filters_applied": {
-                    "dirs_only": false,
-                    "files_only": false,
-                    "extensions": ["png", "jpg"],
-                    "exclude_extensions": null,
-                    "filename_filter": null
-                }
-            }
-            </pre>
+{
+    "files": [
+        {
+            "name": "image1.png",
+            "path": "output/images/image1.png",
+            "is_dir": false,
+            "size": 12345,
+            "modified": 1615480345.123,
+            "created": 1615480340.123,
+            "width": 1920,
+            "height": 1080
+        },
+        {
+            "name": "video1.mp4",
+            "path": "output/videos/video1.mp4",
+            "is_dir": false,
+            "size": 5678901,
+            "modified": 1615480345.123,
+            "created": 1615480340.123,
+            "width": 1920,
+            "height": 1080,
+            "duration": 120.5
+        },
+        {
+            "name": "model1.obj",
+            "path": "output/models/model1.obj",
+            "is_dir": false,
+            "size": 23456,
+            "modified": 1615480345.123,
+            "created": 1615480340.123,
+            "width": 10.5,
+            "height": 15.2,
+            "depth": 8.7,
+            "vertices": 2500,
+            "faces": 4800
+        },
+        ...
+    ],
+    "pagination": {
+        "total": 10542,
+        "page": 1,
+        "limit": 100,
+        "total_pages": 106
+    },
+    "sort": {
+        "field": "modified",
+        "order": "desc"
+    },
+    "filters_applied": {
+        "dirs_only": false,
+        "files_only": false,
+        "extensions": ["png", "mp4", "obj"],
+        "exclude_extensions": null,
+        "filename_filter": null
+    }
+}
+        </pre>
+        
+        <h4>File Dimension Information</h4>
+        <p>The API automatically includes dimension information for supported file types:</p>
+        <ul>
+            <li><strong>Images</strong> (.jpg, .jpeg, .png, .gif, .bmp, .webp):
+                <ul>
+                    <li><code>width</code>: Image width in pixels</li>
+                    <li><code>height</code>: Image height in pixels</li>
+                </ul>
+            </li>
+            <li><strong>Videos</strong> (.mp4, .avi, .mov, .mkv, .webm, .flv, .wmv):
+                <ul>
+                    <li><code>width</code>: Video width in pixels</li>
+                    <li><code>height</code>: Video height in pixels</li>
+                    <li><code>duration</code>: Video duration in seconds</li>
+                </ul>
+            </li>
+            <li><strong>3D Models</strong> (.obj, .stl, .ply, .glb, .gltf, .fbx, .dae, .3ds):
+                <ul>
+                    <li><code>width</code>: Model width (X-axis dimension)</li>
+                    <li><code>height</code>: Model height (Y-axis dimension)</li>
+                    <li><code>depth</code>: Model depth (Z-axis dimension)</li>
+                    <li><code>vertices</code>: Number of vertices in the model (if available)</li>
+                    <li><code>faces</code>: Number of faces in the model (if available)</li>
+                </ul>
+            </li>
+        </ul>
+        <p>Note: If a file can't be processed or dimensions can't be extracted, these fields will be omitted from the response.</p>
+    </div>
+    
+    <div class="endpoint">
+        <h3>Get File</h3>
+        <p><span class="method">GET</span> <span class="url">/folder_server/file/{folder_type}/{file_path}</span></p>
+        <p>Downloads a file from the specified folder.</p>
     </div>
 
     <div class="endpoint">

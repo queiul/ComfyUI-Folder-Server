@@ -8,10 +8,18 @@ import subprocess
 import sys
 import os
 
-# Check if watchdog is installed
+# Check if packages are installed
 if importlib.util.find_spec("watchdog") is None:
     print("Installing watchdog module...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "watchdog>=3.0.0"])
+
+if importlib.util.find_spec("moviepy") is None:
+    print("Installing moviepy module...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "moviepy"])
+
+if importlib.util.find_spec("trimesh") is None:
+    print("Installing trimesh module...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "trimesh"])
 
 import json
 import shutil
@@ -24,6 +32,8 @@ from server import PromptServer
 from PIL import Image
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from moviepy.video.io.VideoFileClip import VideoFileClip
+from .prompt import *
 
 # Store WebSocket connections and their subscriptions
 websocket_connections = {}
@@ -381,6 +391,58 @@ async def list_folder(request):
                 "modified": stat_info.st_mtime,
                 "created": stat_info.st_ctime
             }
+
+            # Add image dimensions if it's an image file
+            if not entry.is_dir():
+                _, ext = os.path.splitext(entry.name)
+                ext = ext.lower()
+                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
+                    try:
+                        with Image.open(entry.path) as img:
+                            file_info["width"] = img.width
+                            file_info["height"] = img.height
+                    except Exception:
+                        # If there's an error reading the image, don't add dimensions
+                        pass
+
+                elif ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv']:
+                    try:
+                        # Use moviepy to get video dimensions
+                        clip = VideoFileClip(entry.path)
+                        file_info["width"] = int(clip.size[0])
+                        file_info["height"] = int(clip.size[1])
+                        file_info["duration"] = clip.duration
+                        clip.close()
+                    except Exception as e:
+                        # If there's an error processing the video, don't add dimensions
+                        pass
+
+                elif ext in ['.obj', '.stl', '.ply', '.glb', '.gltf', '.fbx', '.dae', '.3ds']:
+                    try:
+                        # Use trimesh to get 3D model dimensions
+                        mesh = trimesh.load(entry.path)
+                        
+                        # Get bounding box dimensions
+                        if hasattr(mesh, 'bounding_box'):
+                            bounds = mesh.bounding_box.bounds
+                        else:
+                            bounds = mesh.bounds
+                        
+                        # Calculate dimensions from bounds
+                        dimensions = bounds[1] - bounds[0]  # max - min
+                        
+                        file_info["width"] = float(dimensions[0])
+                        file_info["height"] = float(dimensions[1])
+                        file_info["depth"] = float(dimensions[2])
+                        
+                        # Add additional 3D model info
+                        if hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
+                            file_info["vertices"] = len(mesh.vertices)
+                            file_info["faces"] = len(mesh.faces)
+                    except Exception:
+                        # If there's an error processing the 3D model, don't add dimensions
+                        pass
+
             files.append(file_info)
         
         # Return paginated results with metadata
@@ -662,269 +724,17 @@ atexit.register(cleanup_watchers)
 # Create a simple API documentation page with WebSocket information
 @server.PromptServer.instance.routes.get("/folder_server/docs")
 async def api_docs(request):
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Folder Server API Documentation</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
-            h1 { color: #333; }
-            h2 { color: #555; margin-top: 30px; }
-            h3 { color: #666; }
-            pre { background: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; }
-            .endpoint { margin-bottom: 20px; }
-            .method { font-weight: bold; }
-            .url { color: #0066cc; }
-            .test-section { margin-top: 40px; padding: 20px; background: #f9f9f9; border-radius: 5px; }
-            .test-output { height: 200px; overflow-y: auto; background: #000; color: #0f0; padding: 10px; font-family: monospace; }
-            button { padding: 8px 15px; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; }
-            button:hover { background: #0055aa; }
-            select, input { padding: 8px; border-radius: 4px; border: 1px solid #ccc; }
-        </style>
-    </head>
-    <body>
-        <h1>Folder Server API Documentation</h1>
-        
-        <div class="endpoint">
-            <h2>REST API Endpoints</h2>
-            
-            <!-- Update the List Folder Contents section in the API documentation HTML -->
-            <h3>List Folder Contents</h3>
-            <p><span class="method">GET</span> <span class="url">/folder_server/list/{folder_type}</span></p>
-            <p>Lists files and directories in the specified folder with sorting, pagination, and filtering support.</p>
-            <p>Parameters:</p>
-            <ul>
-                <li><strong>folder_type</strong>: Either "input" or "output"</li>
-                <li><strong>subfolder</strong> (optional): Subfolder path</li>
-                <li><strong>sort_by</strong> (optional): Field to sort by. Options: "name", "size", "modified", "created". Default: "name"</li>
-                <li><strong>sort_order</strong> (optional): Sort direction. Options: "asc", "desc". Default: "asc"</li>
-                <li><strong>page</strong> (optional): Page number for pagination. Default: 1</li>
-                <li><strong>limit</strong> (optional): Number of items per page. Default: 100</li>
-                <li><strong>refresh</strong> (optional): Force refresh of the directory cache. Options: "true", "false". Default: "false"</li>
-                <li><strong>dirs_only</strong> (optional): Only list directories. Options: "true", "false". Default: "false"</li>
-                <li><strong>files_only</strong> (optional): Only list files. Options: "true", "false". Default: "false"</li>
-                <li><strong>extensions</strong> (optional): Filter files by extensions (comma-separated). Example: "jpg,png,gif"</li>
-                <li><strong>exclude_extensions</strong> (optional): Exclude files with these extensions (comma-separated). Example: "tmp,bak"</li>
-                <li><strong>filter</strong> (optional): Text filter for filenames (case-insensitive)</li>
-            </ul>
-            <p>Example response:</p>
-            <pre>
-            {
-                "files": [
-                    {
-                    "name": "image1.png",
-                    "path": "output/images/image1.png",
-                    "is_dir": false,
-                    "size": 12345,
-                    "modified": 1615480345.123,
-                    "created": 1615480340.123
-                    },
-                    ...
-                ],
-                "pagination": {
-                    "total": 10542,
-                    "page": 1,
-                    "limit": 100,
-                    "total_pages": 106
-                },
-                "sort": {
-                    "field": "modified",
-                    "order": "desc"
-                },
-                "filters_applied": {
-                    "dirs_only": false,
-                    "files_only": false,
-                    "extensions": ["png", "jpg"],
-                    "exclude_extensions": null,
-                    "filename_filter": null
-                }
-            }
-            </pre>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Get File</h3>
-            <p><span class="method">GET</span> <span class="url">/folder_server/file/{folder_type}/{file_path}</span></p>
-            <p>Downloads a file from the specified folder.</p>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Upload File</h3>
-            <p><span class="method">POST</span> <span class="url">/folder_server/upload/{folder_type}</span></p>
-            <p>Uploads a file to the specified folder.</p>
-            <p>Form data:</p>
-            <ul>
-                <li><strong>file</strong>: The file to upload</li>
-                <li><strong>subfolder</strong> (optional): Subfolder path</li>
-            </ul>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Delete File</h3>
-            <p><span class="method">DELETE</span> <span class="url">/folder_server/file/{folder_type}/{file_path}</span></p>
-            <p>Deletes a file or directory from the specified folder.</p>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Create Directory</h3>
-            <p><span class="method">POST</span> <span class="url">/folder_server/create_dir/{folder_type}</span></p>
-            <p>Creates a new directory in the specified folder.</p>
-            <p>JSON body:</p>
-            <pre>{"path": "path/to/new/directory"}</pre>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Move/Rename File</h3>
-            <p><span class="method">POST</span> <span class="url">/folder_server/move</span></p>
-            <p>Moves or renames a file or directory.</p>
-            <p>JSON body:</p>
-            <pre>{"source": "input/path/to/file", "destination": "output/new/path/to/file"}</pre>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Copy File</h3>
-            <p><span class="method">POST</span> <span class="url">/folder_server/copy</span></p>
-            <p>Copies a file or directory.</p>
-            <p>JSON body:</p>
-            <pre>{"source": "input/path/to/file", "destination": "output/new/path/to/file"}</pre>
-        </div>
-        
-        <h2>WebSocket API for File Change Notifications</h2>
-        <p>Connect to the WebSocket endpoint to receive real-time file change notifications:</p>
-        <p><span class="url">ws://localhost:8188/ws/folder_server</span></p>
-        
-        <h3>WebSocket Messages</h3>
-        
-        <h4>Subscribe to a folder:</h4>
-        <pre>{"action": "subscribe", "folder_type": "input"}</pre>
-        
-        <h4>Unsubscribe from a folder:</h4>
-        <pre>{"action": "unsubscribe", "folder_type": "input"}</pre>
-        
-        <h4>Event notifications you will receive:</h4>
-        <ul>
-            <li><strong>file_created</strong>: When a new file is created</li>
-            <li><strong>file_modified</strong>: When a file is modified</li>
-            <li><strong>file_deleted</strong>: When a file is deleted</li>
-            <li><strong>file_moved</strong>: When a file is moved or renamed</li>
-            <li><strong>directory_created</strong>: When a new directory is created</li>
-            <li><strong>directory_deleted</strong>: When a directory is deleted</li>
-            <li><strong>directory_moved</strong>: When a directory is moved or renamed</li>
-        </ul>
-        
-        <div class="test-section">
-            <h2>WebSocket Test Console</h2>
-            <div>
-                <select id="folderType">
-                    <option value="input">input</option>
-                    <option value="output">output</option>
-                </select>
-                <button id="connectBtn">Connect</button>
-                <button id="disconnectBtn" disabled>Disconnect</button>
-            </div>
-            <div style="margin-top: 10px;">
-                <button id="subscribeBtn" disabled>Subscribe</button>
-                <button id="unsubscribeBtn" disabled>Unsubscribe</button>
-            </div>
-            <h3>Event Log:</h3>
-            <div id="output" class="test-output"></div>
-            
-            <script>
-                let ws = null;
-                let selectedFolder = document.getElementById('folderType').value;
-                
-                document.getElementById('folderType').addEventListener('change', (e) => {
-                    selectedFolder = e.target.value;
-                });
-                
-                function appendToOutput(message, isError = false) {
-                    const output = document.getElementById('output');
-                    const msgElement = document.createElement('div');
-                    msgElement.textContent = message;
-                    if (isError) {
-                        msgElement.style.color = '#ff6b6b';
-                    }
-                    output.appendChild(msgElement);
-                    output.scrollTop = output.scrollHeight;
-                }
-                
-                document.getElementById('connectBtn').addEventListener('click', () => {
-                    if (ws) {
-                        appendToOutput('Already connected', true);
-                        return;
-                    }
-                    
-                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    const wsUrl = `${protocol}//${window.location.host}/ws/folder_server`;
-                    
-                    appendToOutput(`Connecting to ${wsUrl}...`);
-                    ws = new WebSocket(wsUrl);
-                    
-                    ws.onopen = () => {
-                        appendToOutput('Connected!');
-                        document.getElementById('connectBtn').disabled = true;
-                        document.getElementById('disconnectBtn').disabled = false;
-                        document.getElementById('subscribeBtn').disabled = false;
-                        document.getElementById('unsubscribeBtn').disabled = false;
-                    };
-                    
-                    ws.onmessage = (event) => {
-                        const data = JSON.parse(event.data);
-                        appendToOutput('Received: ' + JSON.stringify(data, null, 2));
-                    };
-                    
-                    ws.onclose = () => {
-                        appendToOutput('Disconnected');
-                        ws = null;
-                        document.getElementById('connectBtn').disabled = false;
-                        document.getElementById('disconnectBtn').disabled = true;
-                        document.getElementById('subscribeBtn').disabled = true;
-                        document.getElementById('unsubscribeBtn').disabled = true;
-                    };
-                    
-                    ws.onerror = (error) => {
-                        appendToOutput('Error: ' + error.message, true);
-                    };
-                });
-                
-                document.getElementById('disconnectBtn').addEventListener('click', () => {
-                    if (ws) {
-                        ws.close();
-                    }
-                });
-                
-                document.getElementById('subscribeBtn').addEventListener('click', () => {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        const message = {
-                            action: 'subscribe',
-                            folder_type: selectedFolder
-                        };
-                        ws.send(JSON.stringify(message));
-                        appendToOutput('Sent: ' + JSON.stringify(message));
-                    } else {
-                        appendToOutput('WebSocket not connected', true);
-                    }
-                });
-                
-                document.getElementById('unsubscribeBtn').addEventListener('click', () => {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        const message = {
-                            action: 'unsubscribe',
-                            folder_type: selectedFolder
-                        };
-                        ws.send(JSON.stringify(message));
-                        appendToOutput('Sent: ' + JSON.stringify(message));
-                    } else {
-                        appendToOutput('WebSocket not connected', true);
-                    }
-                });
-            </script>
-        </div>
-    </body>
-    </html>
-    """
-    return web.Response(text=html, content_type="text/html")
+    # Construct the path to the docs.html file
+    base_path = os.path.dirname(os.path.realpath(__file__))
+    docs_file_path = os.path.join(base_path, "docs.html")
+    
+    # Check if the file exists
+    if os.path.exists(docs_file_path):
+        return web.FileResponse(docs_file_path)
+    else:
+        # Fallback to the existing dynamic HTML if the file doesn't exist
+        return web.Response(text="Documentation file not found. Please create a docs.html file.", 
+                           content_type="text/html")
 
 print("Folder Server node with file change notifications loaded!")
 
@@ -940,8 +750,6 @@ def initialize_default_watchers():
     # Set up watchers for main input and output folders
     input_folder = os.path.join(base_path, "input")
     output_folder = os.path.join(base_path, "output")
-
-    print(output_folder)
     
     # Create folders if they don't exist
     os.makedirs(input_folder, exist_ok=True)

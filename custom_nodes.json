@@ -11,6 +11,14 @@
       {
         "name": "watchdog",
         "pip": "watchdog>=3.0.0"
+      },
+      {
+        "name": "moviepy",
+        "pip": "moviepy"
+      },
+      {
+        "name": "trimesh",
+        "pip": "trimesh"
       }
     ]
   }
